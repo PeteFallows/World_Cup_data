@@ -10,10 +10,14 @@
 ## scrape_comp: competition teams and logos (not yet used)
 
 # Structure is:
-# control_data: control table
+# control_data: table of parameters
 # player_data_list: R list of players from Wikipedia pages
 # player_data_unnested: unnested R list of players, with additional data for players
-# player_data_full: player_data_unnested, with additional data for country codes
+# player_data_with_countries: with additional data for countries
+# player_data_with_correct_names: with data cleansing for player names
+# player_data_with_correct_clubnames: with data cleansing for player's club's names
+# player_data_with_ages: with additional data for dates & ages
+# player_database: full database of player data, after additional info & data cleansing
 
 
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
@@ -46,6 +50,7 @@ control_data <- tibble(
   url = paste0("https://en.wikipedia.org/wiki/", years, "_FIFA_World_Cup_squads")
 ) 
 
+pos_level_order = c("GK", "DF", "MF","FW")
 
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 # Functions 
@@ -113,6 +118,7 @@ get_players <- function(u, n){
              .[p$squad_list] %>%
              html_nodes("td:nth-last-child(1)") %>%
              .[not_line] %>%
+             html_node("a:nth-child(2)") %>%
              html_attr("href"),
            club_league_country_original = hh %>%
              .[p$squad_list] %>%
@@ -131,6 +137,9 @@ get_players <- function(u, n){
     )
 }
 
+# sort letters in a string in alphabetical order
+strSort <- function(x)
+  sapply(lapply(strsplit(x, NULL), sort), paste, collapse="")
 
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 # Read in input files
@@ -162,9 +171,14 @@ player_data_unnested <- player_data_list %>%
   select(-url, -no_teams) %>%
   mutate(pos = str_sub(string = pos, start = 2),
          captain = str_detect(string = player, pattern = "captain|Captain|\\(c\\)"),
+         no_original = no,
+         no = ifelse(years <= 1950, NA, as.numeric(no)),
          player_original = player,
          player = str_remove(string = player, pattern = " \\s*\\([^\\)]+\\)"),
          player = str_replace(player, "\\[.*\\]", ""),
+         player = str_replace(player, "\\*", ""),
+         player = str_to_title(player),
+         player_url = tolower(player_url),
          date_of_birth_age = str_replace(date_of_birth_age, "\\( ", "\\("),
          date_of_birth_age = str_replace(date_of_birth_age, "age ", "aged "),
          date_of_birth_age = ifelse(date_of_birth_age == "", NA, date_of_birth_age),
@@ -175,6 +189,7 @@ player_data_unnested <- player_data_list %>%
          caps = str_replace(caps, "\\[.*\\]", "NA"),
          caps = str_replace(caps, "\\*", ""),
          club = str_replace(club, "\\[.*\\]", ""),
+         club = str_replace(club, "\\*", ""),
          dob_age_format = str_count(date_of_birth_age, "\\("),
          dob_length = nchar(date_of_birth_age),
          dob_1 = ifelse(dob_age_format == 2, substr(date_of_birth_age, 2, 11),
@@ -199,7 +214,7 @@ country_custom_match <- c("CIS" = "CIS",
         "Scotland" = "GB-SCT",
         "Wales" = "GB-WLS", 
         "Serbia and Montenegro" = "SCG",
-        "FR Yugoslavia" = "SCG",
+        "FR Yugoslavia" = "YUG",
         "Yugoslavia" = "YUG",
         "Kingdom of Yugoslavia" = "YUG",
         "Federal Republic of Yugoslavia" = "YUG",
@@ -209,7 +224,7 @@ country_custom_match <- c("CIS" = "CIS",
         "Dutch East Indies" = "DEI")
 
 
-player_data_full <- player_data_unnested %>%
+player_data_with_countries <- player_data_unnested %>%
   mutate(nat_team = case_when(
     squad == "Soviet Union" ~ "USSR",
     squad == "China PR" ~ "China",
@@ -219,7 +234,7 @@ player_data_full <- player_data_unnested %>%
       club_league_country_original == "Soviet Union" ~ "USSR",
       club_league_country_original == "Socialist Federal Republic of Yugoslavia" ~ "Yugoslavia",
       club_league_country_original == "Kingdom of Yugoslavia" ~ "Yugoslavia",
-      club_league_country_original == "Federal Republic of Yugoslavia"  ~ "FR Yugoslavia",
+      club_league_country_original == "Federal Republic of Yugoslavia"  ~ "Yugoslavia",
       TRUE ~ club_league_country_original),
     club_country = case_when(
       # clubs which play in a league in a different country, Does not include NASL, MLS.
@@ -244,27 +259,287 @@ player_data_full <- player_data_unnested %>%
     club_league_country_flag = str_remove(string = club_league_country_flag, pattern = "/[^/]+$"),
     club_league_same = replace_na(ifelse(nat_team_alpha3 == club_league_alpha3, 1, 0), 0),
     club_country_same = replace_na(ifelse(nat_team_alpha3 == club_country_alpha3, 1, 0), 0),
-    club_league_country_same = replace_na(ifelse(club_league_alpha3 == club_country_alpha3, 1, 0), 0)) %>%
+    club_league_country_same = replace_na(ifelse(club_league_alpha3 == club_country_alpha3, 1, 0), 0),
+    # adjust for Serbia and Montenegro compared to Serbia
+    club_league_same = ifelse(nat_team_alpha3 == "SCG" &  club_league_alpha3 == "SRB", 1, club_league_same),
+    club_country_same = ifelse(nat_team_alpha3 == "SCG" &  club_country_alpha3 == "SRB", 1, club_country_same)) %>%
   # get additional information from input tables
   left_join(confederations, by = c("nat_team" = "Country")) %>%
-  rename("nat_team_confederation" = "Confederation") %>%
+  rename("team_confederation_current" = "Confederation") %>%
   left_join(confederations, by = c("club_league_country" = "Country")) %>%
   rename("club_confederation" = "Confederation") %>%
-  mutate(nat_team_confederation = case_when(
-    nat_team == "Australia" & years <= 2006 ~ "OFC",
-    nat_team == "Israel" & years <= 1974 ~ "OFC",
-    TRUE ~ nat_team_confederation),
+  mutate(nat_team_confederation = team_confederation_current,
+         nat_team_confederation = case_when(
+           nat_team == "Australia" & years <= 2006 ~ "OFC",
+           nat_team == "Israel" & years <= 1974 ~ "OFC",
+           TRUE ~ nat_team_confederation),
     club_confederation = case_when(
       club_league_country == "Australia" & years <= 2006 ~ "OFC",
       club_league_country == "Israel" & years <= 1974 ~ "OFC",
       club_league_country == "Réunion" ~ "CAF",
-      TRUE ~ club_confederation))
+      TRUE ~ club_confederation),
+    nat_team_current_name = ifelse(nat_team_alpha3 == "DEU", "Germany", nat_team),
+    club_country_current_name = case_when(
+      club_country_alpha3 == "DEU" ~ "Germany",
+      club_country_alpha3 == "DDR" ~ "Germany",
+      club_country_alpha3 == "SUN" ~ "Russia",
+      club_country_alpha3 == "CSK" ~ "Czech Republic",
+      TRUE ~ club_country)) %>%
+    mutate(club_country_current_name = case_when(
+      # German Third Reich
+      club == "Admira Wien" & years == 1938 ~ "Austria",
+      club == "SC Ostmark Wien" & years == 1938 ~ "Austria",
+      club == "First Vienna" & years == 1938 ~ "Austria",
+      club == "Rapid Wien" & years == 1938 ~ "Austria",
+      
+      # Former USSR (not to Russia)
+      club == "Dynamo Kyiv" ~ "Ukraine",
+      club == "Chornomorets Odesa" ~ "Ukraine",
+      club == "Dnipro Dnipropetrovsk" ~ "Ukraine",
+      club == "Ararat Yerevan" ~ "Armenia",
+      club == "Dinamo Tbilisi" ~ "Georgia",
+      club == "Dynamo Minsk" ~ "Belarus",
+      club == "Dinamo Minsk" ~ "Belarus",
+      club == "Neftyanik Baku" ~ "Azerbaijan",
+      
+      # Yugoslavia
+      club == "Dinamo Zagreb" ~ "Croatia",
+      club == "Hajduk Split" ~ "Croatia",
+      club == "Rijeka" ~ "Croatia",
+      club == "Lokomotiva Zagreb" ~ "Croatia",
+      club == "Olimpija Ljubljana" ~ "Slovenia",
+      club == "Partizan" ~ "Serbia",
+      club == "Partizan Belgrade" ~ "Serbia",
+      club == "Red Star Belgrade" ~ "Serbia",
+      club == "OFK Belgrade" ~ "Serbia",
+      club == "BSK Beograd" ~ "Serbia",
+      club == "Jugoslavija Beograd" ~ "Serbia",
+      club == "SK Jugoslavija" ~ "Serbia",
+      club == "Nasa Krila Zemun" ~ "Serbia",
+      club == "SK Soko" ~ "Serbia",
+      club == "Spartak Subotica" ~ "Serbia",
+      club == "Vojvodina Novi Sad" ~ "Serbia",
+      club == "SK Vojvodina" ~ "Serbia",
+      club == "Sarajevo" ~ "Bosnia and Herzegovina",
+      club == "Sloboda Tuzla" ~ "Bosnia and Herzegovina",
+      club == "Velez Mostar" ~ "Bosnia and Herzegovina",
+      # the following did not map properly just by the characters in the club name
+      club_url == "/wiki/Radni%C4%8Dki_Belgrade" ~ "Serbia",
+      club_url == "/wiki/FK_%C5%BDeljezni%C4%8Dar_Sarajevo" ~ "Bosnia and Herzegovina",
+      club_url == "/wiki/FK_Budu%C4%87nost_Podgorica" ~ "Montenegro",
+      
+      # Czechoslovakia (not to Czech Republic)
+      club == "Slovan Bratislava" ~ "Slovakia",
+      club == "SK Slovan Bratislava" ~ "Slovakia",
+      club == "TJ Slovan CHZJD" ~ "Slovakia",
+      club == "Inter Bratislava" ~ "Slovakia",
+      club == "CH Bratislava" ~ "Slovakia",
+      club == "TJ Internacionál Slovnaft" ~ "Slovakia",
+      club == "TJ Slovnaft Bratislava" ~ "Slovakia",
+      club == "CsSK Bratislava" ~ "Slovakia",
+      club == "Baník Handlová" ~ "Slovakia",
+      club == "Dunajská Streda" ~ "Slovakia",
+      club == "FC Spartak Trnava" ~ "Slovakia",
+      club == "Iskra Zilina" ~ "Slovakia",
+      club == "Jednota Trencín" ~ "Slovakia",
+      club == "Lokomotiva Kosice" ~ "Slovakia",
+      club == "VSS Kosice" ~ "Slovakia",
+      club == "Spartak TAZ Trnava" ~ "Slovakia",
+      club == "Spartak Trnava" ~ "Slovakia",
+      club == "Plastika Nitra" ~ "Slovakia",
+      club == "Tatran Presov" ~ "Slovakia",
+      club == "Trnava" ~ "Slovakia",
+      
+      TRUE ~ club_country_current_name)) 
 
-player_database = player_data_full %>%
+# Correct the player name for different names for same wiki page url. Assume can only have one wiki page.
+# Use player_url later combined with player for unique player ID.
+player_urls_multiple_names = player_data_with_countries %>%
+  select(player, player_url) %>%
+  distinct() %>%
+  group_by(player_url) %>%
+  summarise(count_players_for_url = n()) %>%
+  filter(count_players_for_url > 1)
+
+player_names_correct = player_data_with_countries %>%
+  left_join(player_urls_multiple_names, by = c("player_url" = "player_url")) %>%
+  filter(count_players_for_url > 1) %>%
+  select(years, player, player_url) %>%
+  group_by(player_url) %>%
+  mutate(max_years = max(years)) %>%
+  ungroup() %>%
+  filter(years == max_years) %>%
+  select(player:player_url) %>%
+  rename("player_correct_name" = 'player')
+
+player_data_with_correct_names = player_data_with_countries %>%
+  left_join(player_names_correct , by = c("player_url" = "player_url")) %>%
+  mutate(player = ifelse(is.na(player_correct_name), player, player_correct_name))
+
+
+
+# Correct the club name for different names for same wiki page url. Assume can only have one wiki page.
+# Unlike player_url, which is used combined with player for unique player ID, club_url will not be used later.
+# The unique listing for club will be club_current_name & country_current_name.
+club_urls_multiple_names = player_data_with_countries %>%
+  select(club, club_country_current_name, club_url) %>%
+  distinct() %>%
+  group_by(club_url, club_country_current_name) %>%
+  summarise(count_clubs_for_url = n()) %>%
+  filter(count_clubs_for_url > 1)
+
+club_names_correct = player_data_with_countries %>%
+  mutate(row_num = row_number()) %>%
+  left_join(club_urls_multiple_names , by = c("club_url" = "club_url",
+                                          "club_country_current_name" = "club_country_current_name")) %>%
+  select(row_num, club, club_country_current_name, club_url) %>%
+  group_by(club_url, club_country_current_name) %>%
+  mutate(max_rownum = max(row_num)) %>%
+  ungroup() %>%
+  filter(row_num == max_rownum) %>%
+  select(club:club_url) %>%
+  rename("club_correct_name_from_url" = 'club') %>%
+  distinct()
+
+player_data_with_correct_clubnames = player_data_with_correct_names %>%
+  left_join(club_names_correct, by = c("club_url" = "club_url",
+                                        "club_country_current_name" = "club_country_current_name")) %>%
+  mutate(club_original = club,
+         club_current_name = ifelse(is.na(club_correct_name_from_url), club, club_correct_name_from_url)) %>%
+  # change names of clubs manually for cases where clubs have different urls & names but are same club
+  mutate(club_current_name = case_when(
+      # Algeria
+      club == "RS Kouba" ~ "RC Kouba",
+      # Argentina
+      club == "Colón de Santa Fe" ~ "Colón",
+      # Austria
+      club == "Wacker Wien" ~ "Admira Wacker",
+      club == "Wiener SC" ~ "Wiener Sport-Club",
+      club == "Wiener Sportclub" ~ "Wiener Sport-Club",
+      club == "Linzer ASK" ~ "LASK",
+      # Belgium
+      club == "Germinal Ekeren" ~ "Germinal Beerschot",
+      club == "Royal FC Malinois" ~ "Mechelen",
+      club == "Royal FC Brugeois" ~ "Club Brugge",
+      club == "Royal Racing Club de Gand" ~ "Gent",
+      club == "SC Anderlechtois" ~ "Anderlecht",
+      club == "R. Union Saint-Gilloise" ~ "Union St. Gilloise",
+      # Bolivia
+      club == "Club Bolivar" ~ "Bolívar",
+      # Brazil
+      club == "America-RJ" ~ "América",
+      # Cameroon
+      club == "Canon Yaoundé" ~ "Canon Yaounde",
+      club == "Cottonsport Garoua" ~ "Coton Sport",
+      club == "Cotonsport Garoua" ~ "Coton Sport",
+      club == "Prévoyance Yaoundé" ~ "Prevoyance Yaounde",
+      club == "Tonnerre Yaounde" ~ "Tonnerre Yaoundé",
+      club == "Dragon Douala" ~ "Dragon Douala",
+      # Chile
+      club == "Colo Colo" ~ "Colo-Colo",
+      # China
+      club == "Beijing Guo'an" ~ "Beijing Sinobo Guoan",
+      club == "Beijing Guoan" ~ "Beijing Sinobo Guoan",
+      club == "Tianjin Teda" ~ "Tianjin TEDA",
+      # Croatia
+      club == "Lokomotiva Zagreb" ~ "Lokomotiva",
+      # Cuba
+      club == "Centro Gallego" ~ "CD Centro Gallego",
+      club == "Iberia Habana" ~ "Iberia Havana",
+      club == "Juventud Aturiana" ~ "Juventud Asturiana",
+      # Former Czechoslovakia
+      club == "Zidenice" ~ "SK Zidenice",
+      # Egypt
+      club == "Zamalek Mokhtalat" ~ "Zamalek",
+      # France
+      club == "RC Strasbourg" ~ "Strasbourg",
+      club == "FC Sète" ~ "Sète",
+      club == "FC Sochaux" ~ "Sochaux",
+      club == "RC Paris" ~ "Racing Paris",
+      club == "Racing Club de France" ~ "Racing Paris",
+      # Germany
+      club == "SG Dynamo Dresden" ~ "Dynamo Dresden",
+      # Hungary
+      club == "Pécs" ~ "Pécsi Munkás",
+      club == "Tatabányai Bányász SE" ~ "Tatabányai Bányász",
+      club == "Budapesti Dózsa" ~ "Újpesti Dózsa",
+      club == "MTK" ~ "MTK Hungária",
+      # Italy
+      club == "Internazionale Milan" ~ "Inter Milan",
+      # Japan
+      club == "JEF United Ichihara" ~ "JEF United",
+      # Mexico
+      club == "CD Zacatepec" ~ " Zacatepec",
+      club == "CD Guadalajara" ~ "Guadalajara",
+      club == "CF Atlas" ~ "Atlas",
+      club == "CF Monterrey" ~ "Monterrey",
+      club == "Léon" ~ "León",
+      # Morocco
+      club == "Chabab Mohammedia" ~ " Chabab Mohammédia",
+      # Netherlands
+      club == "Ajax Amsterdam" ~ "Ajax",
+      club == "SC Feyenoord Rotterdam" ~ "Feyenoord",
+      # North Korea
+      club == "8 February" ~ "April 25",
+      # Norway
+      club == "Vålerengen" ~ "Vålerenga",
+      # Paraguay
+      club == "Guarani" ~ "Guaraní",
+      # Portugal
+      club == "Vitória de Setúbal" ~ "Vitória de Guimarães",
+      # Russia
+      club == "SKA Rostov" ~ "Rostov",
+      club == "Zenit Leningrad" ~ "Zenit Saint Petersburg",
+      # Serbia
+      club == "OFK Belgrade" ~ "OFK Beograd",
+      club == "Partizan Belgrade" ~ "Partizan",
+      # South Korea
+      club == "Daewoo Royals" ~ "Busan IPark",
+      # Spain
+      club == "Donostia" ~ "Real Sociedad",
+      club == "FC Oviedo" ~ "Oviedo",
+      # Switzerland
+      club == "Lucerne" ~ "Luzern",
+      club == "Young Boys Bern" ~ "Young Boys",
+      # Turkey
+      club == "Fenerbahçe SK" ~ "Fenerbahçe",
+      club == "Galatasaray S.K." ~ "Galatasaray",
+      
+      # other
+      club == "Free agent" ~ "Free agent",
+      club == "Unattached" ~ "Unattached",
+
+      # former Dutch East Indies
+      squad == "Dutch East Indies" ~ club_original,
+
+      # clubs with name from more than one country
+      club == "Real España" & club_country == "Mexico" ~ "Real Club España",
+
+      # no changes needed
+      TRUE ~ club_current_name)) %>%
+  mutate(club_current_name = case_when(
+    club_correct_name_from_url == "TR Veracruz" ~ "Veracruz",
+    club_correct_name_from_url == "Ferencvárosi TC" ~ "Ferencvárosi",
+    club_url == "/wiki/R%C3%A1ba_ETO_Gy%C5%91r" ~ "Gyori",
+    club_url == "/wiki/Gy%C5%91ri_ETO_FC" ~ "Gyori",
+    club_correct_name_from_url == "Internazionale" ~ "Inter Milan",
+    club_correct_name_from_url == "Internazionale Milano F.C." ~ "Inter Milan",
+    club_correct_name_from_url == "SC Young Fellows" ~ "YF Juventus",
+
+    club_url == "/wiki/Kas%C4%B1mpa%C5%9Fa_SK"  ~ "Kasimpasa",
+    club_url == "/wiki/Kas%C4%B1mpa%C5%9Fa_S.K."  ~ "Kasimpasa",
+    club_url == "/wiki/Chinezul_Timi%C8%99oara" ~ "Chinezul Timi??oara",
+    TRUE ~ club_current_name))
+
+
+# add in age information & other flags
+player_data_with_ages = player_data_with_correct_clubnames %>%
   left_join(tournament_details , by = c("years" = "Year")) %>%
   mutate(last_bday = dob_date + ifelse(month(dob_date) == 2 & day(dob_date) == 29, -1, 0) + years(age_int),
          days_since_bday = as.numeric(tournament_start_date - last_bday),
          age_years.days = age_int + days_since_bday / 365.25,
+         birth_month = month(dob_date),
+         birthday = format(dob_date, "%d %b"),
          dob_age_mismatch = ifelse(last_bday > tournament_start_date, 1, 0), # omit any further data cleansing for these cases
          host_flag = ifelse(nat_team == Host_country, 1, 0),
          winner_flag = ifelse(nat_team == Winner, 1, 0),
@@ -276,47 +551,101 @@ player_database = player_data_full %>%
   mutate(count_appearances_by_team = n()) %>%
   ungroup %>%
   group_by(player, player_url) %>%
-  mutate(count_teams = n(),
-         first_appearance = min(years)) %>%
-  ungroup
+  mutate(app_count = 1, 
+         count_appearances = n(),
+         first_appearance = min(years),
+         appearance_no = cumsum(app_count),
+         nat_team_1 = nat_team[1],
+         nat_team_2 = nat_team[2],
+         nat_team_3 = nat_team[3],
+         nat_team_4 = nat_team[4],
+         nat_team_5 = nat_team[5],
+         concat_teams_1_2 = ifelse(is.na(nat_team_2) | nat_team_2 == nat_team_1, nat_team_1, paste(nat_team_1, ", ",nat_team_2, sep = "")),
+         teams_represented = ifelse(is.na(nat_team_3) | nat_team_3 == nat_team_2, concat_teams_1_2, paste(concat_teams_1_2, ", ",nat_team_3, sep = "")),
+         nat_team_confed_1 = nat_team_confederation[1],
+         nat_team_confed_2 = nat_team_confederation[2],
+         # only need to add to this if player changes confed in their third tournament
+         confeds_represented = ifelse(is.na(nat_team_confed_2) | nat_team_confed_2 == nat_team_confed_1, nat_team_confed_1, paste(nat_team_confed_1, ", ",nat_team_confed_2, sep = "")),
+         first_confed = nat_team_confed_1,
+         name_characters = str_replace_all(player, "\"", "'"),
+         name_characters = str_replace(name_characters, "\\'.*\\'", ""),
+         name_characters = str_replace_all(name_characters, "\'", ""),
+         name_characters = tolower(strSort(name_characters)), 
+         name_characters = str_replace_all(name_characters, " ", ""),
+         name_characters = str_replace_all(name_characters, "\\.", ""),
+         name_characters = str_replace_all(name_characters, "\\-", ""),
+         n_chars = nchar(name_characters)) %>%
+  ungroup %>%
+  # remove helper variables
+  select(-c(app_count, nat_team_1:concat_teams_1_2, nat_team_confed_1:nat_team_confed_2))
+player_data_with_ages$pos <- factor(player_data_with_ages$pos, ordered = TRUE, levels = pos_level_order)
+
+
+player_database = player_data_with_ages
 
 
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 # Analysis - 
 
+# list of all clubs by country
+list_unique_clubs = player_database %>%
+  group_by(club_current_name, club_country_current_name) %>%
+  summarise(count = n(),
+            min_year = min(years),
+            max_year = max(years)) %>%
+  arrange(club_country_current_name, club_current_name, desc(max_year), count)   
+
+new_clubs = list_unique_clubs %>%
+  filter(min_year == max(years))
+
 # checks on nat_team and club_league_country match
-unatached_players = player_data_full %>%
+unattached_players = player_database %>%
   # filter(is.na(nat_team))
   # filter(is.na(nat_team_alpha3))
   # filter(is.na(club_league_country))
   filter(is.na(club_league_alpha3))
 
 # list of countries represented in data - either player or club
-countries_represented = player_data_full %>%
-  select(nat_team, club_league_country) %>%
-  pivot_longer(cols = 1:2, names_to = "type", values_to = "label") %>%
+countries_represented = player_database %>%
+  select(years, nat_team, club_league_country) %>%
+  pivot_longer(cols = 2:3, names_to = "type", values_to = "country") %>%
   select(-type) %>%
-  distinct() %>%
-  arrange(label)
+  group_by(country) %>%
+  summarise(min_year = min(years),
+            max_year = max(years)) %>%
+  arrange(country)
+
+new_countries = countries_represented %>%
+  filter(min_year == max(years))
 
 # players from Australian clubs
-aust = player_data_full %>%
+aust = player_database %>%
   filter(club_league_country == "Australia")
 
 # players with multiple countries
 multiple_teams = player_database %>%
-  filter(!(count_appearances_by_team == count_teams)) %>%
+  filter(!(count_appearances_by_team == count_appearances)) %>%
   arrange(first_appearance, player) %>%
   select(-first_appearance)
+
+# winning captains
+winning_captains = player_database %>%
+  filter(winner_flag == 1 & captain == 1) %>%
+  select(years:club, club_current_name, club_country_current_name, birthday, age_int,days_since_bday)
+winning_captains
 
 
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 # export output to csv format
 setwd(dir_output)
+save(player_database, file = "World_Cup_player_database.Rdata")
 write.csv(player_database, file = "World_Cup_player_database.csv")
-write.csv(countries_represented, file = "World_Cup_countries_represented.csv")
-setwd(dir_input) 
 
+write.csv(list_unique_clubs, file = "World_Cup_list_clubs.csv")
+write.csv(countries_represented, file = "World_Cup_countries_represented.csv")
+write.csv(multiple_teams, file = "World_Cup_multiple_teams.csv")
+#write.csv(winning_captains, file = "World_Cup_winning_captains.csv")
+setwd(dir_input) 
 
 
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
@@ -341,10 +670,10 @@ setwd(dir_input)
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 # To do:
  
- 
-# Review output - World_Cup_player_data.csv
-# club_url is NA. Amend function to have club_url showing.
- 
+# Small number of errors in club_current_name. (usually related to non-English alphabet characters)
+
+# (review vignette for countrycode package) Update current country name for Dutch East Indies, Zaire, and any others?
+
 # Review Guy Abel's other scripts 
  ## scrape_flag: national team flags (not yet used)
  ## scrape_comp: competition teams and logos (not yet used)
